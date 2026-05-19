@@ -1,0 +1,26 @@
+<mujoco model="goal">
+  <compiler angle="radian"/>
+
+  <default>
+    <default class="goal">
+      <geom type="cylinder" rgba="0.9 0.9 0.9 1.0" contype="1" conaffinity="1" condim="1"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <!-- Left post: at y=-1.5m, centered at z=0.9m, radius=0.04, half-height=0.9 -->
+    <body name="left_post" pos="0 -1.5 0.9" childclass="goal">
+      <geom name="left_post_geom" size="0.04 0.9"/>
+    </body>
+
+    <!-- Right post: at y=1.5m, centered at z=0.9m -->
+    <body name="right_post" pos="0 1.5 0.9" childclass="goal">
+      <geom name="right_post_geom" size="0.04 0.9"/>
+    </body>
+
+    <!-- Crossbar: at z=1.8m, half-height=1.5m, rotated 90° about X -->
+    <body name="crossbar" pos="0 0 1.8" quat="0.7071 0.7071 0 0" childclass="goal">
+      <geom name="crossbar_geom" size="0.04 1.5"/>
+    </body>
+  </worldbody>
+</mujoco>

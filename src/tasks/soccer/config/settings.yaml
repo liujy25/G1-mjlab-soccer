@@ -27,11 +27,11 @@ penalty_spot:
 # ball_pos and shooter_pos are derived from penalty_spot.distance_from_goal;
 # they are listed here as comments for reference only.
 #   ball_pos:    [-distance, 0, ball.radius]
-#   shooter_pos: [-distance - 0.5, 0, 0.8]
+#   shooter_pos: [-distance - shooter_behind_ball, 0, 0.8]
 scene:
   goal_pos: [0.0, 0.0, 0.0]
   goalkeeper_pos: [0.0, 0.0, 0.8]
-  shooter_behind_ball: 0.5  # m — shooter stands this far behind the ball
+  shooter_behind_ball: 1.0  # m — shooter stands this far behind the ball (avoid foot/ball collision at reset)
 
 # Ground contact (shooter reference: restitution 0.8 via solref damping).
 ground:
@@ -40,14 +40,20 @@ ground:
   friction: [1.0, 1.0] # static, dynamic — matches shooter reference
 
 # Goalkeeper ball launch velocity randomization.
-# Yaw spread is computed from goal width, goal_margin, and ball distance:
-#   yaw_spread = atan((goal_width/2 - goal_margin) / penalty_distance)
+# Yaw spread and pitch range are auto-computed from goal geometry and
+# goal_margin — see soccer_settings.py load_settings().
+#   yaw_spread  = atan((goal_width/2 - goal_margin) / penalty_distance)
+#   pitch_min   = atan((goal_margin - ball_radius) / penalty_distance)
+#   pitch_max   = atan((goal_height - goal_margin - ball_radius) / penalty_distance)
 goalkeeper_ball_vel:
-  speed_min: 2.0     # m/s
-  speed_max: 4.5     # m/s
-  pitch_min_deg: 3.0 # degrees — minimum loft angle
-  pitch_max_deg: 8.0 # degrees — maximum loft angle
-  goal_margin: 0.2   # m — keep ball at least this far inside each post
+  speed_min: 3.0 # m/s
+  speed_max: 5.0 # m/s
+  goal_margin: 0.2 # m — keep ball at least this far inside frame (posts + crossbar)
+
+# Shooter ball velocity (for moving-ball kick scenarios).
+shooter_ball_vel:
+  speed: 5.0 # m/s — initial ball speed for kick evaluation
 
 # Episode timeout.
-episode_length_s: 10.0
+episode_length_s: 10.0 # shooter episodes
+goalkeeper_episode_length_s: 3.0 # goalkeeper episodes (matches paper)

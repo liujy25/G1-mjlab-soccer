@@ -107,6 +107,7 @@ def unitree_g1_goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   (minus goal_margin on each side).
   """
   cfg = make_soccer_env_cfg()
+  cfg.episode_length_s = SETTINGS.goalkeeper_episode_length_s
 
   s = SETTINGS.scene
   cfg.scene.entities["robot"] = _g1_robot_at(tuple(s.goalkeeper_pos), math.pi)

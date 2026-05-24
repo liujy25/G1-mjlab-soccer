@@ -78,7 +78,7 @@
 
 \section{Overview}
 
-This is the project component of Embodied AI CS2810 Spring 2026. The task is to develop reinforcement learning skills for humanoid robot soccer using the Unitree G1 platform in MuJoCo physics simulation. The project centers on two tasks:
+This is the project component of Embodied AI CS2810 (Spring 2026). The task is to develop reinforcement learning skills for humanoid robot soccer using the Unitree G1 (29 dof) platform in \texttt{mjlab} physics simulation. The project centers on two tasks:
 
 \begin{itemize}
   \item \textbf{Shooting}: The G1 robot must approach and kick a stationary ball toward a goal. This is a perception-guided motor skill requiring motion tracking priors and ball trajectory prediction.
@@ -97,7 +97,7 @@ Implement single-agent training for the shooter and goalkeeper tasks:
   \item Evaluate trained policies using the provided eval scripts. Target metrics (for full credit):
     \begin{itemize}
       \item Shooter: 100\% success rate over 50 trials (ball crosses goal plane inside the frame).
-      \item Goalkeeper: 90\% block rate over 50 trials (ball velocity drops $>$2 m/s behind the robot).
+      \item Goalkeeper: 100\% block rate over 50 trials (ball does not enter the goal).
     \end{itemize}
 \end{itemize}
 
@@ -115,14 +115,16 @@ Extend to adversarial play where a shooter and goalkeeper compete:
 
 \section{Using the Template}
 
+The template is given at \href{https://github.com/xiaojxkevin/G1-mjlab-soccer}{https://github.com/xiaojxkevin/G1-mjlab-soccer}.
+
 \subsection{Repository Structure}
 
 The template provides:
 
 \begin{itemize}
   \item \textbf{Playable environments}: \texttt{Unitree-G1-Shooter} and \texttt{Unitree-G1-Goalkeeper} registered as mjlab tasks with configurable scene layout, ball physics, and MuJoCo visualization.
-  \item \textbf{Evaluation scripts}: \texttt{eval\_naive\_shooter.py} and \texttt{eval\_naive\_goalkeeper.py} that load trained checkpoints, run headless batch trials, collect paper-matching metrics, and record videos.
-  \item \textbf{Training configs}: Training environment designs under \texttt{config/training/} that specify observation spaces, reward functions, termination conditions, and domain randomization from the two papers. And it should be noticed that these are generated with coding agents and may contain errors. So you should carefully review and debug them before use.\footnote{(Jinxi's Note: actually you cannot get full 60\% credit by just running these configs, you need to understand the design and implement your own training pipeline.)}
+  \item \textbf{Evaluation scripts}: \texttt{eval\_naive\_shooter.py} and \texttt{eval\_naive\_goalkeeper.py} that load trained checkpoints, run headless batch trials, collect paper-matching metrics, and record videos. And you are allowed to modify these scripts if you want to use different observation spaces, reward functions etc.
+  \item \textbf{Training configs}: Training environment designs under \texttt{config/training/} that specify observation spaces, reward functions, termination conditions, and domain randomization from the two papers. And it should be noticed that these are generated with coding agents and may contain errors. So you should carefully review and debug them before use.
 \end{itemize}
 
 \subsection{Play and Visualization}
@@ -153,13 +155,11 @@ python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 \
 
 \subsection{Implementing Training}
 
-The \texttt{train.py} script in \texttt{scripts/} serves as the training entrypoint. It is expected to register their own training tasks, implement the ActorCritic model classes, and run PPO training.
+The \texttt{train.py} script in \texttt{scripts/} serves as the training entrypoint. It is expected to register their own training tasks, implement the model classes, and run PPO training.
 
-\section{Reference}
-
-This project is based on the following papers:
-
+{
 \bibliographystyle{IEEEtran}
 \bibliography{ref}
+}
 
 \end{document}

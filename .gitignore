@@ -17,8 +17,8 @@ private
 .claude
 .codex
 temp
-.bbl
-.synctex.gz
+*.bbl
+*.synctex.gz
 *.aux
 *.fdb_latexmk
 *.fls

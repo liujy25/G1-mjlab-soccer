@@ -1,4 +1,4 @@
-# CS 2810 — Humanoid Robot Soccer
+# CS2810 — Humanoid Robot Soccer
 
 A reinforcement learning template for humanoid robot soccer (shooting + goalkeeping)
 with the Unitree G1 on MuJoCo physics. Built on the
@@ -26,7 +26,7 @@ python scripts/list_envs.py
 # Play (visualize with zero agent)
 python scripts/play.py Unitree-G1-Shooter --agent zero --viewer native
 
-# Eval shooter (paper metrics)
+# Eval shooter
 python scripts/eval_naive_shooter.py --headless --num-trials 50
 python scripts/eval_naive_shooter.py --headless --num-trials 50 --checkpoint <path>
 
@@ -35,7 +35,7 @@ python scripts/eval_naive_shooter.py --headless --num-trials 50 --checkpoint <pa
 # Play (visualize with zero agent)
 python scripts/play.py Unitree-G1-Goalkeeper --agent zero --viewer native
 
-# Eval goalkeeper (paper metrics)
+# Eval goalkeeper
 python scripts/eval_naive_goalkeeper.py --headless --num-trials 50
 python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 --checkpoint <path>
 ```
@@ -44,10 +44,7 @@ python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 --checkpoint 
 
 ### Shooter
 
-Scene: G1 near origin facing -y (motion-local coords, identical to training/play).
-Goal placed at (0, -5, 0) rotated 90° to face G1, ball placed dynamically by
-the command system. No `motion_origin_offset` / `motion_yaw_offset` transform —
-eval uses the exact same coordinate system as training and play mode.
+Scene: G1 near origin facing -y (motion-local coords, identical to training/play). Goal placed at (0, -5, 0) rotated 90° to face G1, ball placed dynamically by the command system. No `motion_origin_offset` / `motion_yaw_offset` transform — eval uses the exact same coordinate system as training and play mode.
 
 **Metrics** (matching HumanoidSoccer §IV-B):
 - **Success Rate** — fraction of episodes where ball crosses goal plane (y≤-5, |x|≤1.5m, z≤1.8m)
@@ -56,9 +53,7 @@ eval uses the exact same coordinate system as training and play mode.
 
 ### Goalkeeper
 
-Scene: G1 at goal line (0, 0, 0.8), yaw=0 faces +x. Ball launched via
-6-region parabolic trajectory model from +x (3-5m front) toward -x (behind).
-Goal at (-0.5, 0, 0) behind G1.
+Scene: G1 at goal line (0, 0, 0.8), yaw=0 faces +x. Ball launched via 6-region parabolic trajectory model from +x (3-5m front) toward -x (behind). Goal at (-0.5, 0, 0) behind G1.
 
 **Ball trajectory** (matching Humanoid-Goalkeeper §III-A):
 - 6 landing regions: Right/Left × Mid/Up/Low
@@ -123,11 +118,9 @@ scripts/
   eval_naive_goalkeeper.py             # Goalkeeper eval (headless stats or viewer)
 ```
 
-## For CS 2810 Students
+## For CS2810 Students
 
-This repository is a **simplified template** based on the reference implementations
-of [HumanoidSoccer](https://arxiv.org/abs/2602.05310) and
-[Humanoid-Goalkeeper](https://github.com/InternRobotics/Humanoid-Goalkeeper).
+This repository is a **simplified template** based on the reference implementations of [HumanoidSoccer](https://arxiv.org/abs/2602.05310) and [Humanoid-Goalkeeper](https://github.com/InternRobotics/Humanoid-Goalkeeper).
 It provides:
 
 - **Playable environments**: `Unitree-G1-Shooter` and `Unitree-G1-Goalkeeper` with
@@ -139,14 +132,7 @@ It provides:
   domain randomization) from both papers. These are provided as design reference
   only — they are **not registered as tasks**.
 
-**You need to implement training yourself.** The training task registrations
-(Stage I, Stage II, Goalkeeper) have been intentionally removed. Students are
-expected to:
-
-1. Study the reference configs under `config/training/` and the paper architectures.
-2. Design and register their own training tasks.
-3. Implement the ActorCritic models (MLP, LSTM, GoalkeeperActorCritic) for PPO training.
-4. Train and evaluate using `train.py` and the provided eval scripts.
+**You need to implement training yourself.** (*Jinxi's Note: actually you cannot get full 60% credit by just running these configs, you need to understand the design and implement your own training pipeline.*)
 
 > **Note**: Adversarial play (loading two G1 robots simultaneously in the same scene)
 > is **not yet implemented**. This feature will be added in a future update to support
@@ -177,10 +163,7 @@ goalkeeper_episode_length_s: 3.0       # goalkeeper
 
 ## Acknowledgements
 
-Built for CS 2810 (Spring 2026). This project uses motion data and design references
-from [HumanoidSoccer](https://github.com/TeleHuman/HumanoidSoccer) and
-[Humanoid-Goalkeeper](https://github.com/InternRobotics/Humanoid-Goalkeeper).
-If you use this template, please cite:
+Built for CS2810 (Spring 2026). This project uses motion data and design references from [HumanoidSoccer](https://github.com/TeleHuman/HumanoidSoccer) and [Humanoid-Goalkeeper](https://github.com/InternRobotics/Humanoid-Goalkeeper). If you use this template, please cite:
 
 ```
 @article{ren2025humanoidgoalkeeper,

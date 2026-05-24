@@ -2,8 +2,7 @@
 
 Runs the goalkeeper environment with a trained policy (or zero-agent fallback),
 records video, and reports observation dimensions. In headless mode, runs
-multiple trials and collects interception statistics (matching the paper's
-evaluation protocol in Section IV).
+multiple trials and collects interception statistics.
 
 Ball trajectory: 6-region parabolic model (matching paper's assign_ball_states).
 Each episode randomly selects a region and samples a ball trajectory.
@@ -27,31 +26,21 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.rl import (
-  MjlabOnPolicyRunner,
-  RslRlModelCfg,
-  RslRlOnPolicyRunnerCfg,
-  RslRlPpoAlgorithmCfg,
-  RslRlVecEnvWrapper,
-)
-from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.rl import RslRlVecEnvWrapper
+from mjlab.tasks.registry import list_tasks, load_env_cfg
+from src.tasks.soccer.config.g1.rl_cfg import GoalkeeperRunner, unitree_g1_goalkeeper_ppo_runner_cfg
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
-# ----- Paper eval thresholds (Section IV, default settings) -----
-# Ball flight: 0.5-1.0s, distance 3-5m, goal 3.0×1.8m
-# Success: ball blocked/intercepted (significant velocity drop when behind robot)
-
-# Velocity drop threshold for block detection (m/s) — paper uses 2.0.
-_BLOCK_VEL_DROP = 2.0
-# Ball is "behind robot" (crossed the goal line) when x > 0.0 in world frame.
-_BEHIND_ROBOT_X = 0.0
+# ----- Goal geometry (goal at (-0.5, 0, 0) behind G1, 3.0m × 1.8m) -----
+_GOAL_X = -0.5
+_GOAL_HALF_WIDTH = 1.5    # m — half of goal width in y
+_GOAL_HEIGHT = 1.8         # m — crossbar height
 
 
 @dataclass
@@ -71,51 +60,11 @@ class EvalConfig:
   task_id: str = "Eval-Goalkeeper"
 
 
-# ----- PPO config for checkpoint loading -----
+def _load_policy(checkpoint_path: str, env, device: str):
+  """Load a Goalkeeper checkpoint using GoalkeeperRunner directly.
 
-
-def _make_agent_cfg():
-  """Minimal PPO config sufficient for loading a policy checkpoint."""
-  return RslRlOnPolicyRunnerCfg(
-    actor=RslRlModelCfg(
-      hidden_dims=(512, 256, 128),
-      activation="elu",
-      obs_normalization=True,
-      distribution_cfg={
-        "class_name": "GaussianDistribution",
-        "init_std": 1.0,
-        "std_type": "scalar",
-      },
-    ),
-    critic=RslRlModelCfg(
-      hidden_dims=(512, 256, 128),
-      activation="elu",
-      obs_normalization=True,
-    ),
-    algorithm=RslRlPpoAlgorithmCfg(
-      value_loss_coef=1.0,
-      use_clipped_value_loss=True,
-      clip_param=0.2,
-      entropy_coef=0.01,
-      num_learning_epochs=5,
-      num_mini_batches=4,
-      learning_rate=1.0e-3,
-      schedule="adaptive",
-      gamma=0.99,
-      lam=0.95,
-      desired_kl=0.01,
-      max_grad_norm=1.0,
-    ),
-    experiment_name="g1_soccer_eval",
-    save_interval=100,
-    num_steps_per_env=24,
-    max_iterations=10001,
-  )
-
-
-def _load_policy(checkpoint_path: str, env, device: str, task_id: str = "Unitree-G1-Goalkeeper"):
-  """Load a PPO checkpoint using the task's registered runner config.
-
+  Uses GoalkeeperRunner + unitree_g1_goalkeeper_ppo_runner_cfg regardless of
+  the task's registered runner (which is None in the simplified template).
   Detects reference HIMPPO checkpoints (which store a single model_state_dict
   for the unified ActorCritic) and loads them directly, bypassing mjlab's
   legacy migration which would convert keys to MLPModel format.
@@ -123,14 +72,9 @@ def _load_policy(checkpoint_path: str, env, device: str, task_id: str = "Unitree
   print(f"[INFO] Loading policy from: {checkpoint_path}")
   loaded = torch.load(checkpoint_path, map_location=device)
 
-  agent_cfg = load_rl_cfg(task_id)
-  runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-  runner = runner_cls(env, asdict(agent_cfg), device=device)
+  agent_cfg = unitree_g1_goalkeeper_ppo_runner_cfg()
+  runner = GoalkeeperRunner(env, asdict(agent_cfg), device=device)
 
-  # Detect reference HIMPPO checkpoint: single model_state_dict with
-  # ActorCritic sub-keys (history_encoder, ball_estimator, etc.).
-  # PPO has separate actor/critic instances (both GoalkeeperActorCritic).
-  # Load all non-critic keys into the actor instance.
   if "model_state_dict" in loaded and hasattr(runner.alg.actor, "history_encoder"):
     print("[INFO] Detected HIMPPO ActorCritic checkpoint — loading directly.")
     actor_state = {k: v for k, v in loaded["model_state_dict"].items() if not k.startswith("critic.")}
@@ -146,7 +90,7 @@ def _load_policy(checkpoint_path: str, env, device: str, task_id: str = "Unitree
 
 def _make_zero_policy(env, device):
   """Return a zero-action policy for baseline evaluation."""
-  act_dim = env.num_actions  # total_action_dim (29), not action_space.shape
+  act_dim = env.num_actions
   class ZeroPolicy:
     def __call__(self, obs):
       del obs
@@ -156,61 +100,23 @@ def _make_zero_policy(env, device):
   return ZeroPolicy()
 
 
-# ----- Eval metrics (matching paper Section IV) -----
+# ----- Eval metric: ball must not enter the goal -----
 
 
-def _is_blocked(ball_vel_x_history: list, ball_pos_x_history: list) -> bool:
-  """Check if ball was blocked: significant deceleration when near/behind robot.
-
-  Paper criterion: x-velocity drops > 2 m/s when ball is behind robot (x > 0
-  in local frame). We adapt this to world frame.
-
-  The ball travels in the -x direction, so vx is negative. A block is
-  detected when the ball speed (|vx|) drops significantly behind the robot.
-  """
-  if len(ball_vel_x_history) < 2:
-    return False
-  # Ball moves in -x; track speeds toward goal as positive magnitudes.
-  speeds = [abs(v) for v in ball_vel_x_history]
-  for i in range(len(ball_vel_x_history)):
-    x = ball_pos_x_history[i]
-    if x > _BEHIND_ROBOT_X:
-      max_speed = max(speeds[: i + 1])
-      current_speed = speeds[i]
-      if max_speed - current_speed > _BLOCK_VEL_DROP:
-        return True
-  return False
-
-
-def _min_ball_robot_dist(ball_pos_w: torch.Tensor, robot_pos_w: torch.Tensor) -> float:
-  """Minimum distance between ball and robot pelvis (xy-plane)."""
-  delta = ball_pos_w[:2] - robot_pos_w[:2]
-  return float(torch.norm(delta))
+def _ball_entered_goal(ball_pos: torch.Tensor) -> bool:
+  """Ball has crossed the goal plane (x=-0.5) inside the goal frame."""
+  x, y, z = ball_pos[0].item(), ball_pos[1].item(), ball_pos[2].item()
+  return x <= _GOAL_X and abs(y) <= _GOAL_HALF_WIDTH and z <= _GOAL_HEIGHT
 
 
 def run_trial(env, policy, max_steps: int = 150) -> dict:
-  """Run one eval episode and return stats.
-
-  Returns keys:
-    blocked (bool), ball_past_robot (bool), ball_final_x (float),
-    min_ball_robot_dist (float), max_ball_speed (float),
-    ball_speed_at_robot (float | None), steps (int), terminated (bool)
-  """
+  """Run one eval episode and return whether the ball entered the goal."""
   obs = env.reset()
   if isinstance(obs, tuple):
     obs = obs[0]
 
   ball = env.unwrapped.scene["ball"]
-  robot = env.unwrapped.scene["robot"]
-
-  blocked = False
-  ball_past_robot = False
-  ball_final_x = 0.0
-  min_dist = float("inf")
-  max_ball_speed = 0.0
-  ball_speed_at_robot = None
-  ball_vel_x_history: list[float] = []
-  ball_pos_x_history: list[float] = []
+  ball_entered = False
   steps = 0
 
   for _ in range(max_steps):
@@ -222,43 +128,13 @@ def run_trial(env, policy, max_steps: int = 150) -> dict:
     steps += 1
 
     ball_pos = ball.data.root_link_pos_w[0].cpu()
-    ball_vel = ball.data.root_link_lin_vel_w[0].cpu()
-    robot_pos = robot.data.root_link_pos_w[0].cpu()
-    speed = float(torch.norm(ball_vel))
-
-    ball_vel_x_history.append(float(ball_vel[0]))
-    ball_pos_x_history.append(float(ball_pos[0]))
-
-    ball_final_x = float(ball_pos[0])
-    max_ball_speed = max(max_ball_speed, speed)
-
-    dist = _min_ball_robot_dist(ball_pos, robot_pos)
-    if dist < min_dist:
-      min_dist = dist
-
-    # Detect ball crossing behind robot.
-    if ball_pos[0] > _BEHIND_ROBOT_X and ball_speed_at_robot is None:
-      ball_speed_at_robot = speed
-
-    if ball_pos[0] > _BEHIND_ROBOT_X:
-      ball_past_robot = True
-
-    if not blocked:
-      blocked = _is_blocked(ball_vel_x_history, ball_pos_x_history)
+    if _ball_entered_goal(ball_pos):
+      ball_entered = True
 
     if terminated:
       break
 
-  return {
-    "blocked": blocked,
-    "ball_past_robot": ball_past_robot,
-    "ball_final_x": ball_final_x,
-    "min_ball_robot_dist": min_dist,
-    "max_ball_speed": max_ball_speed,
-    "ball_speed_at_robot": ball_speed_at_robot,
-    "steps": steps,
-    "terminated": terminated,
-  }
+  return {"ball_entered_goal": ball_entered, "steps": steps, "terminated": terminated}
 
 
 # ----- Headless multi-trial eval -----
@@ -271,49 +147,28 @@ def run_headless_eval(cfg: EvalConfig, env, policy):
     return
   print(f"\n[INFO] Running {cfg.num_trials} headless eval trials...\n")
 
-  results: list[dict] = []
   blocked_count = 0
-  past_robot_count = 0
-  min_dists: list[float] = []
-  speeds_at_robot: list[float] = []
 
   for trial in range(cfg.num_trials):
     stats = run_trial(env, policy)
-    results.append(stats)
-    if stats["blocked"]:
+    if not stats["ball_entered_goal"]:
       blocked_count += 1
-    if stats["ball_past_robot"]:
-      past_robot_count += 1
-    if stats["min_ball_robot_dist"] < float("inf"):
-      min_dists.append(stats["min_ball_robot_dist"])
-    if stats["ball_speed_at_robot"] is not None:
-      speeds_at_robot.append(stats["ball_speed_at_robot"])
 
     print_interval = 1 if cfg.num_trials <= 10 else (cfg.num_trials // 10)
     if (trial + 1) % print_interval == 0 or trial == 0:
       print(
         f"  Trial {trial + 1:3d}/{cfg.num_trials}: "
-        f"blocked={stats['blocked']}, "
-        f"past_robot={stats['ball_past_robot']}, "
-        f"min_dist={stats['min_ball_robot_dist']:.3f}, "
+        f"blocked={not stats['ball_entered_goal']}, "
         f"steps={stats['steps']}"
       )
 
-  # Summary (matching paper Table II, Section IV).
   total = cfg.num_trials
   success_rate = blocked_count / total * 100 if total > 0 else 0
-  mean_min_dist = float(np.mean(min_dists)) if min_dists else 0.0
-  std_min_dist = float(np.std(min_dists)) if min_dists else 0.0
-  mean_speed_at_robot = float(np.mean(speeds_at_robot)) if speeds_at_robot else 0.0
-  pass_through_rate = past_robot_count / total * 100 if total > 0 else 0
 
   print(f"\n{'='*55}")
   print(f"  Eval Summary ({total} trials)")
   print(f"{'='*55}")
-  print(f"  Blocked (Esucc):      {blocked_count}/{total} = {success_rate:.1f}%")
-  print(f"  Ball behind robot:    {past_robot_count}/{total} = {pass_through_rate:.1f}%")
-  print(f"  Min ball-robot dist:  {mean_min_dist:.3f} ± {std_min_dist:.3f} m")
-  print(f"  Mean speed at robot:  {mean_speed_at_robot:.2f} m/s")
+  print(f"  Block Rate:  {blocked_count}/{total} = {success_rate:.1f}%")
   print(f"{'='*55}\n")
 
 
@@ -329,7 +184,6 @@ def run_eval(cfg: EvalConfig):
   env_cfg.viewer.height = cfg.video_height
   env_cfg.viewer.width = cfg.video_width
 
-  # Print env info.
   actor_terms = list(env_cfg.observations["actor"].terms.keys())
   critic_terms = list(env_cfg.observations["critic"].terms.keys())
   events = list(env_cfg.events.keys())
@@ -344,7 +198,6 @@ def run_eval(cfg: EvalConfig):
   print(f"Episode length: {env_cfg.episode_length_s}s")
   print(f"Obs noise: {env_cfg.observations['actor'].enable_corruption}")
 
-  # Print trajectory params.
   from src.tasks.soccer.config.soccer_settings import SETTINGS
 
   print(f"\nBall trajectory ({len(SETTINGS.goalkeeper_regions)} regions, parabolic model):")
@@ -374,27 +227,20 @@ def run_eval(cfg: EvalConfig):
       disable_logger=True,
     )
 
-  # Wrap with RSL-RL.
   env = RslRlVecEnvWrapper(env, clip_actions=100.0)
 
-  # Policy.
   if cfg.checkpoint:
-    policy = _load_policy(cfg.checkpoint, env, device, task_id="Unitree-G1-Goalkeeper")
+    policy = _load_policy(cfg.checkpoint, env, device)
   else:
     policy = _make_zero_policy(env, device)
     print("[INFO] Using zero-agent fallback (no checkpoint provided).")
 
-  # Print runtime shapes.
   obs_space = env.unwrapped.single_observation_space
-  actor_shape = obs_space.spaces["actor"].shape
-  critic_shape = obs_space.spaces["critic"].shape
-  action_dim = env.num_actions
   print(f"\nRuntime shapes:")
-  print(f"  Actor obs dim:  {actor_shape}")
-  print(f"  Critic obs dim: {critic_shape}")
-  print(f"  Action dim:     {action_dim}")
+  print(f"  Actor obs dim:  {obs_space.spaces['actor'].shape}")
+  print(f"  Critic obs dim: {obs_space.spaces['critic'].shape}")
+  print(f"  Action dim:     {env.num_actions}")
 
-  # Run headless or viewer.
   if cfg.headless:
     run_headless_eval(cfg, env, policy)
   else:
@@ -402,11 +248,8 @@ def run_eval(cfg: EvalConfig):
       print("[INFO] --num-trials is set but --headless is not; "
             "running viewer (use --headless for batch eval stats).")
 
-    # Select viewer.
     if cfg.viewer == "auto":
-      has_display = bool(
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-      )
+      has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
       viewer_type = "native" if has_display else "viser"
     else:
       viewer_type = cfg.viewer

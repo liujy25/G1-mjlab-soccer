@@ -91,10 +91,10 @@ The project is evaluated out of 100 total points, broken down into three primary
 \subsection{Phase 1: Basic Shooting and Goalkeeping (60\% of project score)}
 Implement single-agent training for individual shooter and goalkeeper tasks in a non-adversarial setting. You may refer to \cite{kong2026learningsoccerskillshumanoid} and \cite{ren2025humanoidgoalkeeper} for guidance on environment design, reward shaping, and training strategies. This phase evaluates the fundamental motor control and perception integration of your policies.
 
-The 60\% allocation is divided equally between the two tasks (30\% each), using a strict tiered accuracy model calculated over 50 evaluation trials:
+The 60\% allocation is divided equally between the two tasks (30\% each), calculated over 50 evaluation trials:
 \begin{itemize}
     \item \textbf{Shooter Policy (30 points total):} Evaluated using \texttt{eval\_naive\_shooter.py}. Success is defined as the ball completely crossing the goal plane inside the frame posts.
-    \item \textbf{Goalkeeper Policy (30 points total):} Evaluated using \texttt{eval\_naive\_goalkeeper.py}. Success is defined as a clean block where the ball is intercepted or deflected outside the goal frame.
+    \item \textbf{Goalkeeper Policy (30 points total):} Evaluated using \texttt{eval\_naive\_goalkeeper.py}. Success is defined as preventing the ball from entering the goal (ball does not cross the goal plane inside the frame).
 \end{itemize}
 
 Both tasks are scored with a linear formula applied to the success/block rate over 50 evaluation trials:
@@ -105,7 +105,7 @@ Success rates below 80\% receive 0 points. At 80\% the score is 0, at 100\% the 
 
 \subsection{Phase 2: Cross-Evaluation Tournament (30\% of project score)}
 
-Phase 2 is structured as a decentralized, all-to-all peer-to-peer cross-evaluation. The 30\% allocation is divided equally between shooting and goalkeeping (15\% each). After completing basic single-agent policies in Phase 1, teams continue to improve their agents---through adversarial training, self-play, or further single-agent optimization---and then compete against every other team.
+Phase 2 is an all-to-all cross-evaluation tournament conducted centrally by the teaching team. The 30\% allocation is divided equally between shooting and goalkeeping (15\% each). After completing basic single-agent policies in Phase 1, teams continue to improve their agents---through adversarial training, self-play, or further single-agent optimization---and then compete against every other team.
 
 Because each team will design unique observation spaces, feature extractors, and neural network architectures, your codebases will be heterogeneous. To enable cross-evaluation without requiring teams to share code or checkpoints, the tournament adopts a standardized API interface: each team deploys their trained policy behind a lightweight server, and the competition script \texttt{scripts/compete.py} loads two G1 robots into a single MuJoCo scene and queries each team's server at every simulation step.
 
@@ -134,7 +134,7 @@ All teams must implement a policy server exposing the following two endpoints (a
 \subsubsection{Timeline and Milestones}
 \begin{itemize}
     \item \textbf{Weeks 13--16: Agent Development \& Improvement} \\
-    Teams first complete their basic single-agent shooting and goalkeeping policies (Phase 1). They then continuously improve their agents' capabilities through adversarial training, self-play, or further single-agent optimization. By the end of Week 16 (6.21), every team must freeze their code and publicly publish a GitHub repository containing their complete implementation, training configurations, and final trained checkpoints for both shooter and goalkeeper.
+    Teams first complete their basic single-agent shooting and goalkeeping policies (Phase 1). They then continuously improve their agents' capabilities through adversarial training, self-play, or further single-agent optimization. And this phase will continue until the end of week 16 (6.21).
 
     \item \textbf{Week 17: Tournament \& Report Submission} \\
     The tournament is conducted centrally on a server provided by the teaching team (we will make the server available later). Each team deploys their policy servers (which must be network-reachable from the tournament server) and submits the access URLs. The teaching team runs \texttt{scripts/compete.py} for every pair of teams (Team A and Team B), evaluating both directions:
@@ -156,10 +156,10 @@ There are 14 teams in total. Each team's Phase 2 score is computed separately fo
 Each team plays every other team once per task direction, yielding 13 head-to-head opportunities per task. The maximum score per task is therefore $2 + 13 = 15$ points.
 
 \subsection{Submission and Deliverables (10\% of project score)}
-Submission consists of a PDF report and the corresponding code repository before the end of Week 17 (6.26). The PDF report must include:
+Submission consists of a PDF report and the corresponding code repository before the end of Week 17 (6.26) to gradescope. The PDF report must include:
 \begin{itemize}
     \item \textbf{Phase 1 Results:} Basic shooting and goalkeeping evaluation results (success/block rates over 50 trials) with analysis.
-    \item \textbf{Phase 2 Results:} Complete cross-evaluation results against all other teams---your shooter vs.\ each opponent's goalkeeper, and your goalkeeper vs.\ each opponent's shooter (10 trials each). Include a summary table of all matchups and the final tournament scores for both tasks.
+    \item \textbf{Phase 2 Design \& Approach:} Description of how you improved your agents for the tournament (adversarial training, self-play, or further single-agent optimization). Explain your API server implementation, including how you compute observations from raw state. Since the tournament is conducted centrally by the teaching team, you do not need to report cross-evaluation results yourself.
 \end{itemize}
 
 

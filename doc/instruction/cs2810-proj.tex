@@ -114,9 +114,14 @@ Because each team will design unique observation spaces, feature extractors, and
 All teams must implement a policy server exposing the following two endpoints (a reference implementation is provided as \texttt{scripts/api\_server.py}):
 
 \begin{itemize}
-    \item \texttt{POST /act} --- Receives an observation and returns an action.
+    \item \texttt{POST /act} --- Receives raw MuJoCo state for both robots and the ball, and returns an action for the robot the server controls (determined by the \texttt{-\/-task} flag).
     \begin{verbatim}
-    Request:  {"observation": [[f32, ...]]}
+    Request:  {
+      "shooter":   {root_pos, root_quat, root_lin_vel, root_ang_vel,
+                    joint_pos, joint_vel, last_action},
+      "goalkeeper": {...},
+      "ball":      {pos, vel}
+    }
     Response: {"action": [[f32, ...]]}\end{verbatim}
     \item \texttt{POST /reset} --- Resets the policy's internal state (LSTM hidden state, history buffer, etc.).
     \begin{verbatim}
@@ -124,7 +129,7 @@ All teams must implement a policy server exposing the following two endpoints (a
     Response: {"status": "ok"}\end{verbatim}
 \end{itemize}
 
-Teams may implement the server in any framework (the reference uses FastAPI), as long as the endpoints and JSON formats match exactly.
+\texttt{compete.py} sends the same raw state to both servers regardless of their role---each server extracts its own robot's data to compute observations.
 
 \subsubsection{Timeline and Milestones}
 \begin{itemize}
@@ -132,12 +137,12 @@ Teams may implement the server in any framework (the reference uses FastAPI), as
     Teams first complete their basic single-agent shooting and goalkeeping policies (Phase 1). They then continuously improve their agents' capabilities through adversarial training, self-play, or further single-agent optimization. By the end of Week 16 (6.21), every team must freeze their code and publicly publish a GitHub repository containing their complete implementation, training configurations, and final trained checkpoints for both shooter and goalkeeper.
 
     \item \textbf{Week 17: Tournament \& Report Submission} \\
-    Teams deploy their policy servers and the tournament is conducted using \texttt{scripts/compete.py}. For each pair of teams (Team A and Team B), both directions are evaluated:
+    The tournament is conducted centrally on a server provided by the teaching team (we will make the server available later). Each team deploys their policy servers (which must be network-reachable from the tournament server) and submits the access URLs. The teaching team runs \texttt{scripts/compete.py} for every pair of teams (Team A and Team B), evaluating both directions:
     \begin{itemize}
         \item Team A's Shooter vs.\ Team B's Goalkeeper (10 trials)
         \item Team B's Shooter vs.\ Team A's Goalkeeper (10 trials)
     \end{itemize}
-    Teams need to actively collaborate to cross-verify the env setup and the competition results. Both the tournament results and the final report are due by the end of Week 17 (6.26).
+    The specific evaluation schedule will be announced before week 17. But notice that both the tournament results and the final report are due by the end of Week 17 (6.26).
 \end{itemize}
 
 \subsubsection{Scoring Mechanism}
@@ -207,23 +212,18 @@ The \texttt{train.py} script in \texttt{scripts/} serves as the training entrypo
 For Phase 2 cross-evaluation, teams deploy their policies as API servers and use \texttt{scripts/compete.py} to run matchups:
 
 \begin{verbatim}
-# Start a policy server
+# Start policy servers (one per robot)
 python scripts/api_server.py --checkpoint <path> --port 8000 --task shooter
+python scripts/api_server.py --checkpoint <path> --port 8001 --task goalkeeper
 
-# Run a matchup (local checkpoint mode, for debugging)
-python scripts/compete.py \
-    --shooter-checkpoint <team_a_shooter.pt> \
-    --goalkeeper-checkpoint <team_b_goalkeeper.pt> \
-    --headless --num-trials 10
-
-# Run a matchup (REST API mode, for tournament)
+# Run a matchup
 python scripts/compete.py \
     --shooter-api http://<team_a_ip>:8000 \
-    --goalkeeper-api http://<team_b_ip>:8000 \
+    --goalkeeper-api http://<team_b_ip>:8001 \
     --headless --num-trials 10
 \end{verbatim}
 
-The script loads two G1 robots into a single MuJoCo scene, sends observations to each team's API (or local policy), concatenates their actions, and reports head-to-head statistics (goals scored, blocks). A reference API server implementation is provided as \texttt{scripts/api\_server.py}.
+The script loads two G1 robots into a single MuJoCo scene, reads raw MuJoCo state (joint angles, root poses, ball position/velocity), and sends the same state dict to both teams' API servers. Each team's server computes its own observation tensor and returns an action. This design fully decouples observation spaces across teams. A reference API server with example observation computation is provided as \texttt{scripts/api\_server.py}.
 
 \subsection{Contributing and Reporting Issues}
 

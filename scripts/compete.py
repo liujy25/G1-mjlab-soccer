@@ -1,66 +1,58 @@
 """Cross-evaluate two teams: Shooter vs Goalkeeper in a shared MuJoCo scene.
 
-Loads two independently-trained G1 policies into one simulation, routes
-each robot's observations to its respective policy, concatenates actions,
-and steps the physics.  Designed for Phase 2 all-to-all peer evaluation
-(10 trials per matchup, per the CS2810 project rubric).
+compete.py reads raw MuJoCo state (joint positions, root poses, ball pos/vel)
+and sends it to each team's policy server via REST API.  Teams compute their
+own observations from raw state, so observation spaces are fully decoupled.
 
 Scene layout (world frame, z-up):
-  - Goalkeeper at (0, 0, 0.8), yaw=0, faces +x  (matches GK training frame)
+  - Goalkeeper at (0, 0, 0.8), yaw=0, faces +x
   - Goal at (-0.5, 0, 0), behind the goalkeeper
   - Shooter at (4, 0, 0.8), yaw=pi, faces -x toward the goal
   - Ball at (3, 0, 0.1), in front of the shooter
 
 Usage:
-  # Headless batch (10 trials, the Phase 2 default)
-  python scripts/compete.py \\
-      --shooter-checkpoint <team_a_shooter.pt> \\
-      --goalkeeper-checkpoint <team_b_goalkeeper.pt> \\
+  # Headless batch (10 trials, Phase 2 default)
+  python scripts/compete.py \
+      --shooter-api http://<team_a_ip>:8000 \
+      --goalkeeper-api http://<team_b_ip>:8001 \
       --headless --num-trials 10
 
   # Interactive viewer (single episode, for debugging)
-  python scripts/compete.py \\
-      --shooter-checkpoint <path> \\
-      --goalkeeper-checkpoint <path>
+  python scripts/compete.py \
+      --shooter-api http://<team_a_ip>:8000 \
+      --goalkeeper-api http://<team_b_ip>:8001
 
-  # Zero-agent baseline (no checkpoints)
+  # Zero-agent baseline (no policy servers)
   python scripts/compete.py --headless --num-trials 10
 
 -------------------------------------------------------------------------------
-CUSTOMIZATION GUIDE (for Phase 2 cross-evaluation)
+RAW STATE PROTOCOL
 -------------------------------------------------------------------------------
 
-When you load another team's checkpoint you MUST match the observation
-space that their policy was trained with.  The sections marked
-``CUSTOMIZE_OBSERVATIONS`` below show where to adjust the observation
-terms for the shooter and goalkeeper.  In most cases you will need the
-opponent team to provide:
+compete.py sends the same raw state dict to both policy servers:
 
-  1. The observation term names, functions, and params they used
-  2. The history_length for the actor observation group
-  3. The action scale and default joint positions
+  {
+    "shooter": {
+      "root_pos": [x,y,z], "root_quat": [w,x,y,z],
+      "root_lin_vel": [vx,vy,vz], "root_ang_vel": [wx,wy,wz],
+      "joint_pos": [...29], "joint_vel": [...29],
+      "last_action": [...29]
+    },
+    "goalkeeper": { "... same structure ..." },
+    "ball": { "pos": [x,y,z], "vel": [vx,vy,vz] }
+  }
 
-This compete.py ships with DEFAULT observation configs that match the
-template's eval scripts:
-
-  Shooter  – proprioception + ball position  (``shared_obs`` functions)
-  Goalkeeper – matches ``eval_goalkeeper_cfg``  (``goalkeeper_obs`` functions,
-               960-D history-stacked actor input, HIMPPO architecture)
-
-If your (or your opponent's) policy was trained with a different
-observation space you MUST update ``make_compete_env_cfg()`` accordingly.
+Each server responds with  {"action": [[...29]]}.
 """
 
 from __future__ import annotations
 
 import math
 import os
-import sys
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import requests
 import torch
 import tyro
@@ -89,56 +81,26 @@ from src.tasks.soccer.ball import get_ball_cfg
 from src.tasks.soccer.goal import get_goal_cfg
 from src.tasks.soccer.ground import get_ground_cfg
 from src.tasks.soccer.soccer_env_cfg import _add_soccer_scene_postproc
-from src.tasks.soccer.config.soccer_settings import SETTINGS
 from src.tasks.soccer import mdp
-from src.tasks.soccer.mdp.shared_obs import (
-    ball_pos_in_robot_frame,
-    ball_vel_in_robot_frame,
-)
-from src.tasks.soccer.mdp.goalkeeper_obs import (
-    _GK_DEFAULT_JOINT_POS,
-    get_gk_robot_cfg,
-    gk_ang_vel,
-    gk_joint_pos_rel,
-    gk_joint_vel_rel,
-    gk_last_action,
-)
-from src.tasks.soccer.config.g1.rl_cfg import (
-    GoalkeeperRunner,
-    SoccerRecurrentRunner,
-    unitree_g1_goalkeeper_ppo_runner_cfg,
-    unitree_g1_soccer_recurrent_runner_cfg,
-)
+from src.tasks.soccer.mdp.goalkeeper_obs import _GK_DEFAULT_JOINT_POS, get_gk_robot_cfg
 
 # =============================================================================
 # Scene constants
 # =============================================================================
 
-# Goalkeeper at origin (matches training coordinate frame: faces +x).
 GK_POS: tuple[float, float, float] = (0.0, 0.0, 0.8)
 GK_YAW: float = 0.0
-
-# Goal behind goalkeeper  (goal plane x = -0.5).
 GOAL_POS: tuple[float, float, float] = (-0.5, 0.0, 0.0)
-
-# Shooter at +x, facing -x toward the goal.
 SHOOTER_POS: tuple[float, float, float] = (4.0, 0.0, 0.8)
 SHOOTER_YAW: float = math.pi
-
-# Ball in front of the shooter.
 BALL_POS: tuple[float, float, float] = (3.0, 0.0, 0.1)
-
-# Episode / control.
 EPISODE_LENGTH_S: float = 10.0
 CONTROL_DECIMATION: int = 4
 MUJOCO_TIMESTEP: float = 0.005
-
-# Goal geometry (behind goalkeeper, x = -0.5, width 3.0 m, height 1.8 m).
 GOAL_X: float = -0.5
 GOAL_HALF_WIDTH: float = 1.5
 GOAL_HEIGHT: float = 1.8
 
-# Commonly-used SceneEntityCfg instances.
 _SHOOTER_CFG = SceneEntityCfg("shooter")
 _GK_CFG = SceneEntityCfg("goalkeeper")
 _BALL_CFG = SceneEntityCfg("ball")
@@ -151,6 +113,50 @@ _BALL_CFG = SceneEntityCfg("ball")
 def _yaw_to_quat(yaw: float) -> tuple[float, float, float, float]:
     half = yaw / 2.0
     return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+# =============================================================================
+# Raw state extraction
+# =============================================================================
+
+def _build_raw_state(
+    env_base: ManagerBasedRlEnv,
+    prev_action_shooter: torch.Tensor,
+    prev_action_gk: torch.Tensor,
+) -> dict:
+    """Read raw MuJoCo state for both robots and the ball.
+
+    prev_action_* tensors have shape (1, 29).
+    """
+    scene = env_base.scene
+    shooter = scene["shooter"]
+    goalkeeper = scene["goalkeeper"]
+    ball = scene["ball"]
+
+    def _robot_state(robot) -> dict:
+        return {
+            "root_pos": robot.data.root_link_pos_w[0].cpu().tolist(),
+            "root_quat": robot.data.root_link_quat_w[0].cpu().tolist(),
+            "root_lin_vel": robot.data.root_link_lin_vel_w[0].cpu().tolist(),
+            "root_ang_vel": robot.data.root_link_ang_vel_w[0].cpu().tolist(),
+            "joint_pos": robot.data.joint_pos[0].cpu().tolist(),
+            "joint_vel": robot.data.joint_vel[0].cpu().tolist(),
+        }
+
+    return {
+        "shooter": {
+            **_robot_state(shooter),
+            "last_action": prev_action_shooter[0].cpu().tolist(),
+        },
+        "goalkeeper": {
+            **_robot_state(goalkeeper),
+            "last_action": prev_action_gk[0].cpu().tolist(),
+        },
+        "ball": {
+            "pos": ball.data.root_link_pos_w[0].cpu().tolist(),
+            "vel": ball.data.root_link_vel_w[0, :3].cpu().tolist(),
+        },
+    }
 
 
 # =============================================================================
@@ -183,29 +189,15 @@ def _make_goalkeeper_robot() -> Any:
 
 
 # =============================================================================
-# Compete Environment Config
-# =============================================================================
-#
-# CUSTOMIZE_OBSERVATIONS: if your (or your opponent's) policy was trained with
-# different observation terms, functions, scaling, or history length, edit the
-# ``shooter_actor_terms``, ``goalkeeper_actor_terms``, and the corresponding
-# critic terms below.  Also adjust history_length on each ObservationGroupCfg.
+# Compete Environment Config  (physics only — no observation groups needed)
 # =============================================================================
 
 def make_compete_env_cfg() -> ManagerBasedRlEnvCfg:
     """Build the two-robot competition environment configuration.
 
-    Returns a ``ManagerBasedRlEnvCfg`` whose scene contains both a "shooter"
-    and a "goalkeeper" entity.  Four observation groups are defined so that
-    each policy can be fed independently:
-
-    * ``shooter_actor``  – observation for the shooter policy
-    * ``shooter_critic`` – privileged obs (unused at inference; included for completeness)
-    * ``goalkeeper_actor``  – observation for the goalkeeper policy (×10 history)
-    * ``goalkeeper_critic`` – privileged obs (unused at inference)
+    No observation groups are defined — compete.py reads raw MuJoCo state
+    directly and sends it to the remote policy servers.
     """
-
-    # -- Scene ----------------------------------------------------------------
 
     entities: dict[str, Any] = {
         "ground": get_ground_cfg(),
@@ -215,129 +207,8 @@ def make_compete_env_cfg() -> ManagerBasedRlEnvCfg:
         "goalkeeper": _make_goalkeeper_robot(),
     }
 
-    # ----------------------------------------------------------------------
-    # CUSTOMIZE_OBSERVATIONS: Shooter actor terms
-    #
-    # Default: proprioception + ball position (~100-D).
-    # If your shooter was trained with motion references, target-point
-    # observations, or different noise / scaling, replace these terms.
-    # ----------------------------------------------------------------------
-    shooter_actor_terms: dict[str, ObservationTermCfg] = {
-        "base_ang_vel": ObservationTermCfg(
-            func=mdp.builtin_sensor,
-            params={"sensor_name": "shooter/imu_ang_vel"},
-        ),
-        "projected_gravity": ObservationTermCfg(
-            func=mdp.projected_gravity,
-            params={"asset_cfg": _SHOOTER_CFG},
-        ),
-        "joint_pos": ObservationTermCfg(
-            func=mdp.joint_pos_rel,
-            params={"asset_cfg": _SHOOTER_CFG},
-        ),
-        "joint_vel": ObservationTermCfg(
-            func=mdp.joint_vel_rel,
-            params={"asset_cfg": _SHOOTER_CFG},
-        ),
-        "actions": ObservationTermCfg(
-            func=mdp.last_action,
-            params={"action_name": "shooter_joint_pos"},
-        ),
-        "ball_pos_local": ObservationTermCfg(
-            func=ball_pos_in_robot_frame,
-            params={"ball_cfg": _BALL_CFG, "robot_cfg": _SHOOTER_CFG},
-        ),
-    }
-
-    shooter_critic_terms: dict[str, ObservationTermCfg] = {
-        **shooter_actor_terms,
-        "base_lin_vel": ObservationTermCfg(
-            func=mdp.builtin_sensor,
-            params={"sensor_name": "shooter/imu_lin_vel"},
-        ),
-    }
-
-    # ----------------------------------------------------------------------
-    # CUSTOMIZE_OBSERVATIONS: Goalkeeper actor terms
-    #
-    # Default: matches ``eval_goalkeeper_cfg`` exactly (960-D history-stacked
-    # input with GK-specific scaling).  If your opponent's goalkeeper uses a
-    # different observation space, replace these terms and adjust
-    # ``history_length`` on the ``goalkeeper_actor`` group below.
-    # ----------------------------------------------------------------------
-    goalkeeper_actor_terms: dict[str, ObservationTermCfg] = {
-        "ball_pos_local": ObservationTermCfg(
-            func=ball_pos_in_robot_frame,
-            params={"ball_cfg": _BALL_CFG, "robot_cfg": _GK_CFG},
-        ),
-        "base_ang_vel": ObservationTermCfg(
-            func=gk_ang_vel,
-            params={"sensor_name": "goalkeeper/imu_ang_vel"},
-        ),
-        "projected_gravity": ObservationTermCfg(
-            func=mdp.projected_gravity,
-            params={"asset_cfg": _GK_CFG},
-        ),
-        "joint_pos": ObservationTermCfg(
-            func=gk_joint_pos_rel,
-            params={"asset_cfg": _GK_CFG},
-        ),
-        "joint_vel": ObservationTermCfg(
-            func=gk_joint_vel_rel,
-            params={"asset_cfg": _GK_CFG},
-        ),
-        "actions": ObservationTermCfg(
-            func=gk_last_action,
-            params={"action_name": "goalkeeper_joint_pos"},
-        ),
-    }
-
-    goalkeeper_critic_terms: dict[str, ObservationTermCfg] = {
-        **goalkeeper_actor_terms,
-        "base_lin_vel": ObservationTermCfg(
-            func=mdp.builtin_sensor,
-            params={"sensor_name": "goalkeeper/imu_lin_vel"},
-        ),
-        "ball_vel_local": ObservationTermCfg(
-            func=ball_vel_in_robot_frame,
-            params={"ball_cfg": _BALL_CFG, "robot_cfg": _GK_CFG},
-        ),
-    }
-
-    # -- Observation groups ---------------------------------------------------
-
-    observations: dict[str, ObservationGroupCfg] = {
-        "shooter_actor": ObservationGroupCfg(
-            terms=shooter_actor_terms,
-            concatenate_terms=True,
-            enable_corruption=False,
-            history_length=1,
-        ),
-        "shooter_critic": ObservationGroupCfg(
-            terms=shooter_critic_terms,
-            concatenate_terms=True,
-            enable_corruption=False,
-            history_length=1,
-        ),
-        "goalkeeper_actor": ObservationGroupCfg(
-            terms=goalkeeper_actor_terms,
-            concatenate_terms=True,
-            enable_corruption=False,
-            history_length=10,  # CUSTOMIZE_OBSERVATIONS: 10-frame HIMPPO stack
-        ),
-        "goalkeeper_critic": ObservationGroupCfg(
-            terms=goalkeeper_critic_terms,
-            concatenate_terms=True,
-            enable_corruption=False,
-            history_length=1,
-        ),
-    }
-
     # -- Actions --------------------------------------------------------------
 
-    # CUSTOMIZE_OBSERVATIONS: action scales must match what each policy
-    # expects.  Shooter uses per-joint G1_ACTION_SCALE; goalkeeper uses
-    # uniform 0.25 (matching GK PD gains).
     actions: dict[str, ActionTermCfg] = {
         "shooter_joint_pos": JointPositionActionCfg(
             entity_name="shooter",
@@ -431,7 +302,30 @@ def make_compete_env_cfg() -> ManagerBasedRlEnvCfg:
             num_envs=1,
             spec_fn=_add_soccer_scene_postproc,
         ),
-        observations=observations,
+        observations={
+            # Dummy terms — mjlab requires at least one term per group for
+            # initialization. Raw state is read directly from MuJoCo instead.
+            "shooter_actor": ObservationGroupCfg(
+                terms={
+                    "dummy": ObservationTermCfg(
+                        func=mdp.builtin_sensor,
+                        params={"sensor_name": "shooter/imu_ang_vel"},
+                    ),
+                },
+                concatenate_terms=True, enable_corruption=False,
+                history_length=1,
+            ),
+            "goalkeeper_actor": ObservationGroupCfg(
+                terms={
+                    "dummy": ObservationTermCfg(
+                        func=mdp.builtin_sensor,
+                        params={"sensor_name": "goalkeeper/imu_ang_vel"},
+                    ),
+                },
+                concatenate_terms=True, enable_corruption=False,
+                history_length=1,
+            ),
+        },
         actions=actions,
         commands={},
         events=events,
@@ -458,63 +352,7 @@ def make_compete_env_cfg() -> ManagerBasedRlEnvCfg:
 
 
 # =============================================================================
-# Policy loading
-# =============================================================================
-
-def _load_shooter_policy(
-    checkpoint_path: str, env: ManagerBasedRlEnv, device: str
-) -> Any:
-    """Load a shooter checkpoint via SoccerRecurrentRunner (LSTM-based).
-
-    The runner is initialised from the compete environment so that the model
-    architecture matches the observation and action dimensions of the current
-    env config.  If the checkpoint was trained with a different observation
-    space you will see a size-mismatch error — update the shooter observation
-    terms in ``make_compete_env_cfg()`` and retry.
-    """
-    print(f"[INFO] Loading shooter policy from: {checkpoint_path}")
-    agent_cfg = unitree_g1_soccer_recurrent_runner_cfg()
-    runner = SoccerRecurrentRunner(env, asdict(agent_cfg), log_dir=None, device=device)
-    runner.load(checkpoint_path)
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-    print("[INFO] Shooter policy loaded.")
-    return policy
-
-
-def _load_goalkeeper_policy(
-    checkpoint_path: str, env: ManagerBasedRlEnv, device: str
-) -> Any:
-    """Load a goalkeeper checkpoint via GoalkeeperRunner (HIMPPO-based).
-
-    Detects reference HIMPPO checkpoints (single ``model_state_dict`` for a
-    unified ActorCritic) and loads them directly, bypassing the legacy
-    migration path.  Otherwise falls back to the standard RSL-RL loader.
-    """
-    print(f"[INFO] Loading goalkeeper policy from: {checkpoint_path}")
-    loaded = torch.load(checkpoint_path, map_location=device)
-
-    agent_cfg = unitree_g1_goalkeeper_ppo_runner_cfg()
-    runner = GoalkeeperRunner(env, asdict(agent_cfg), device=device)
-
-    if "model_state_dict" in loaded and hasattr(runner.alg.actor, "history_encoder"):
-        print("[INFO] Detected HIMPPO ActorCritic checkpoint — loading directly.")
-        actor_state = {
-            k: v
-            for k, v in loaded["model_state_dict"].items()
-            if not k.startswith("critic.")
-        }
-        runner.alg.actor.load_state_dict(actor_state, strict=False)
-        print("[INFO] Goalkeeper policy loaded.")
-    else:
-        runner.load(checkpoint_path, load_cfg={"actor": True})
-        print("[INFO] Goalkeeper policy loaded.")
-
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-    return policy
-
-
-# =============================================================================
-# Zero-policy fallbacks
+# Zero-policy fallback
 # =============================================================================
 
 class _ZeroPolicy:
@@ -523,8 +361,7 @@ class _ZeroPolicy:
     def __init__(self, action_dim: int, device: str):
         self._zero = torch.zeros(1, action_dim, device=device)
 
-    def __call__(self, obs: dict) -> torch.Tensor:
-        del obs
+    def __call__(self, _input: Any) -> torch.Tensor:
         return self._zero
 
     def reset(self) -> None:
@@ -532,22 +369,18 @@ class _ZeroPolicy:
 
 
 # =============================================================================
-# REST API policy client  (Phase 2 tournament — robosuite format)
+# REST API policy client
 # =============================================================================
 
 class ApiPolicy:
-    """Policy that delegates to a remote FastAPI server via REST.
-
-    Implements the Phase 2 tournament protocol:
-      POST /act    - send observation, receive action
-      POST /reset  - reset policy hidden state
+    """Policy that delegates to a remote server via the raw state protocol.
 
     Parameters
     ----------
     url : str
         Base URL of the policy server (e.g. ``http://team-a:8000``).
     action_dim : int
-        Expected action dimension (used only for validation).
+        Expected action dimension.
     device : str
         Torch device for the output tensor.
     timeout : float
@@ -560,7 +393,6 @@ class ApiPolicy:
         self._url = url.rstrip("/")
         self._device = device
         self._timeout = timeout
-        # Validate connection at startup.
         try:
             resp = requests.post(
                 f"{self._url}/reset", json={}, timeout=self._timeout,
@@ -571,14 +403,12 @@ class ApiPolicy:
             print(f"[WARN] API policy at {self._url} is not reachable: {e}")
             print(f"       Make sure the server is running before starting trials.")
 
-    def __call__(self, obs: dict) -> torch.Tensor:
-        """Send observation to remote server and return action tensor."""
-        # obs["actor"] is a torch tensor of shape (1, obs_dim).
-        obs_list = obs["actor"].cpu().numpy().tolist()
+    def __call__(self, raw_state: dict) -> torch.Tensor:
+        """Send raw MuJoCo state to remote server and return action tensor."""
         try:
             resp = requests.post(
                 f"{self._url}/act",
-                json={"observation": obs_list},
+                json=raw_state,
                 timeout=self._timeout,
             )
             resp.raise_for_status()
@@ -588,8 +418,7 @@ class ApiPolicy:
             return action
         except requests.RequestException as e:
             raise RuntimeError(
-                f"API call to {self._url}/act failed: {e}\n"
-                f"  Observation shape: {obs['actor'].shape}"
+                f"API call to {self._url}/act failed: {e}"
             ) from e
 
     def reset(self) -> None:
@@ -607,25 +436,38 @@ class ApiPolicy:
 # =============================================================================
 
 class CombinedPolicy:
-    """Wraps two independent policies so the viewer sees a single policy.
+    """Wraps two independent policies so the viewer sees a single policy."""
 
-    Extracts ``shooter_actor`` and ``goalkeeper_actor`` from the full
-    observation dict, calls each sub-policy, and concatenates their actions
-    into one tensor.
-    """
-
-    def __init__(self, shooter_policy: Any, goalkeeper_policy: Any):
+    def __init__(
+        self,
+        shooter_policy: Any,
+        goalkeeper_policy: Any,
+        env_base: ManagerBasedRlEnv,
+        device: str,
+    ):
         self._shooter = shooter_policy
         self._goalkeeper = goalkeeper_policy
+        self._env_base = env_base
+        self._device = device
+        self._prev_action_s = torch.zeros(1, 29, device=device)
+        self._prev_action_g = torch.zeros(1, 29, device=device)
 
-    def __call__(self, obs: dict) -> torch.Tensor:
-        s_act = self._shooter({"actor": obs["shooter_actor"]})
-        g_act = self._goalkeeper({"actor": obs["goalkeeper_actor"]})
-        return torch.cat([s_act, g_act], dim=-1)
+    def __call__(self, _obs: dict) -> torch.Tensor:
+        raw = _build_raw_state(
+            self._env_base, self._prev_action_s, self._prev_action_g,
+        )
+        s_act = self._shooter(raw)
+        g_act = self._goalkeeper(raw)
+        action = torch.cat([s_act, g_act], dim=-1)
+        self._prev_action_s = s_act.detach().clone()
+        self._prev_action_g = g_act.detach().clone()
+        return action
 
     def reset(self) -> None:
         self._shooter.reset()
         self._goalkeeper.reset()
+        self._prev_action_s.zero_()
+        self._prev_action_g.zero_()
 
 
 # =============================================================================
@@ -650,20 +492,29 @@ def _ball_blocked(
     return behind_gk and (prev_speed - speed) > threshold
 
 
+# =============================================================================
+# Trial runner
+# =============================================================================
+
 def run_trial(
     env: ManagerBasedRlEnv,
+    env_base: ManagerBasedRlEnv,
     shooter_policy: Any,
     goalkeeper_policy: Any,
     max_steps: int = 500,
 ) -> dict[str, Any]:
-    """Run one competition episode.
+    """Run one competition episode using raw state protocol.
 
     Returns a dict with keys:
       goal_scored, blocked, steps, ball_final_x, early_termination
     """
-    obs = env.reset()
-    if isinstance(obs, tuple):
-        obs = obs[0]
+    env.reset()
+    shooter_policy.reset()
+    goalkeeper_policy.reset()
+
+    device = env.unwrapped.device
+    prev_action_s = torch.zeros(1, 29, device=device)
+    prev_action_g = torch.zeros(1, 29, device=device)
 
     ball = env.unwrapped.scene["ball"]
     goal_scored = False
@@ -674,13 +525,16 @@ def run_trial(
 
     for _ in range(max_steps):
         with torch.inference_mode():
-            s_act = shooter_policy({"actor": obs["shooter_actor"]})
-            g_act = goalkeeper_policy({"actor": obs["goalkeeper_actor"]})
-        action = torch.cat([s_act, g_act], dim=-1)
+            raw = _build_raw_state(env_base, prev_action_s, prev_action_g)
+            s_act = shooter_policy(raw)
+            g_act = goalkeeper_policy(raw)
 
+        action = torch.cat([s_act, g_act], dim=-1)
         result = env.step(action)
-        obs = result[0]
         steps += 1
+
+        prev_action_s = s_act.detach().clone()
+        prev_action_g = g_act.detach().clone()
 
         ball_pos = ball.data.root_link_pos_w[0].cpu()
         ball_vel = ball.data.root_link_vel_w[0, :3].cpu()
@@ -694,14 +548,12 @@ def run_trial(
 
         prev_ball_speed = ball_speed
 
-        # result[2] is the "terminated" signal (gym API).
         terminated = result[2]
         if hasattr(terminated, "item"):
             terminated = bool(terminated.item())
         else:
             terminated = bool(terminated)
         if terminated:
-            # Distinguish timeout from early termination.
             if steps < max_steps - 1:
                 early_termination = True
             break
@@ -722,6 +574,7 @@ def run_trial(
 def run_headless_eval(
     num_trials: int,
     env: ManagerBasedRlEnv,
+    env_base: ManagerBasedRlEnv,
     shooter_policy: Any,
     goalkeeper_policy: Any,
 ) -> dict[str, Any]:
@@ -734,7 +587,7 @@ def run_headless_eval(
     ball_crossed_goal_line = 0
 
     for trial in range(num_trials):
-        stats = run_trial(env, shooter_policy, goalkeeper_policy)
+        stats = run_trial(env, env_base, shooter_policy, goalkeeper_policy)
         if stats["goal_scored"]:
             goals += 1
         if stats["blocked"]:
@@ -797,12 +650,6 @@ def run_viewer(
 
 @dataclass
 class CompeteConfig:
-    shooter_checkpoint: str | None = None
-    """Path to the shooter policy checkpoint (.pt)."""
-
-    goalkeeper_checkpoint: str | None = None
-    """Path to the goalkeeper policy checkpoint (.pt)."""
-
     shooter_api: str | None = None
     """REST API URL for the shooter policy (Phase 2 tournament)."""
 
@@ -847,50 +694,26 @@ def run_compete(cfg: CompeteConfig) -> None:
     env_cfg.viewer.height = cfg.video_height
     env_cfg.viewer.width = cfg.video_width
 
-    # Print observation info for debugging.
-    for grp_name in ("shooter_actor", "goalkeeper_actor"):
-        grp = env_cfg.observations[grp_name]
-        term_names = list(grp.terms.keys())
-        print(
-            f"{grp_name}: {len(term_names)} terms x {grp.history_length} history  "
-            f"terms={term_names}"
-        )
-
     render_mode = "rgb_array" if cfg.video else None
     env_base = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
-
-    # -- Load policies --------------------------------------------------------
     act_dim_shooter = env_base.action_manager.get_term("shooter_joint_pos").action_dim
     act_dim_goalkeeper = env_base.action_manager.get_term("goalkeeper_joint_pos").action_dim
     print(f"Action dims: shooter={act_dim_shooter}, goalkeeper={act_dim_goalkeeper}")
 
-    # Shooter: API takes precedence over checkpoint.
+    # -- Load policies --------------------------------------------------------
     if cfg.shooter_api:
         shooter_policy = ApiPolicy(cfg.shooter_api, act_dim_shooter, device)
-    elif cfg.shooter_checkpoint:
-        shooter_policy = _load_shooter_policy(cfg.shooter_checkpoint, env_base, device)
     else:
         shooter_policy = _ZeroPolicy(act_dim_shooter, device)
-        print("[INFO] No shooter checkpoint or API — using zero policy.")
+        print("[INFO] No shooter API URL — using zero policy.")
 
-    # Goalkeeper: API takes precedence over checkpoint.
     if cfg.goalkeeper_api:
         goalkeeper_policy = ApiPolicy(cfg.goalkeeper_api, act_dim_goalkeeper, device)
-    elif cfg.goalkeeper_checkpoint:
-        goalkeeper_policy = _load_goalkeeper_policy(cfg.goalkeeper_checkpoint, env_base, device)
     else:
         goalkeeper_policy = _ZeroPolicy(act_dim_goalkeeper, device)
-        print("[INFO] No goalkeeper checkpoint or API — using zero policy.")
+        print("[INFO] No goalkeeper API URL — using zero policy.")
 
-    # Wrap after policy construction so runner sees the raw env.
     env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)
-
-    # Print observed shapes from one reset.
-    obs_sample = env.reset()
-    if isinstance(obs_sample, tuple):
-        obs_sample = obs_sample[0]
-    for key in ("shooter_actor", "goalkeeper_actor"):
-        print(f"  {key} shape: {obs_sample[key].shape}")
 
     # -- Video recording (optional) -------------------------------------------
     if cfg.video and cfg.headless:
@@ -912,12 +735,15 @@ def run_compete(cfg: CompeteConfig) -> None:
         if cfg.num_trials <= 0:
             print("[WARN] --headless without --num-trials; nothing to evaluate.")
         else:
-            run_headless_eval(cfg.num_trials, env, shooter_policy, goalkeeper_policy)
+            run_headless_eval(
+                cfg.num_trials, env, env_base, shooter_policy, goalkeeper_policy,
+            )
     else:
         if cfg.num_trials > 0:
             print("[INFO] --num-trials set without --headless; launching viewer.")
-        combined = CombinedPolicy(shooter_policy, goalkeeper_policy)
-
+        combined = CombinedPolicy(
+            shooter_policy, goalkeeper_policy, env_base, device,
+        )
         if cfg.viewer == "auto":
             has_display = bool(
                 os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")

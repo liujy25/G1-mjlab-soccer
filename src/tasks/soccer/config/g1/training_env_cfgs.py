@@ -63,7 +63,7 @@ def _setup_g1_training(cfg: ManagerBasedRlEnvCfg) -> None:
   # ball_robot = ContactSensorCfg(
   #   name="ball_robot_contact",
   #   primary=ContactMatch(mode="subtree", pattern="ball", entity="ball"),
-  #   secondary=ContactMatch(mode="subtree", pattern="torso_link", entity="robot"),
+  #   secondary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
   #   fields=("found", "force"),
   #   reduce="none",
   #   num_slots=2,

@@ -60,10 +60,24 @@ def _setup_g1_training(cfg: ManagerBasedRlEnvCfg) -> None:
   )
 
   # Ball-robot contact sensor for kick detection.
+  # ball_robot = ContactSensorCfg(
+  #   name="ball_robot_contact",
+  #   primary=ContactMatch(mode="subtree", pattern="ball", entity="ball"),
+  #   secondary=ContactMatch(mode="subtree", pattern="torso_link", entity="robot"),
+  #   fields=("found", "force"),
+  #   reduce="none",
+  #   num_slots=2,
+  #   history_length=4,
+  # )
+
   ball_robot = ContactSensorCfg(
     name="ball_robot_contact",
-    primary=ContactMatch(mode="subtree", pattern="ball", entity="ball"),
-    secondary=ContactMatch(mode="subtree", pattern="torso_link", entity="robot"),
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="subtree", pattern="ball", entity="ball"),
     fields=("found", "force"),
     reduce="none",
     num_slots=2,

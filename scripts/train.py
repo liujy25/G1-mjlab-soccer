@@ -148,16 +148,20 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   runner = runner_cls(env, agent_cfg, str(log_dir), device, **runner_kwargs)
 
   runner.add_git_repo_to_log(__file__)
+  # if resume_path is not None:
+  #   print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+  #   # Stage I→II transfer: architectures differ (MLP→LSTM, 154D→160D).
+  #   # Only restore iteration counter; skip actor/critic/normalizer weights.
+  #   is_soccer_stage2 = task_id == "Unitree-G1-Shooter-Stage2"
+  #   load_cfg = None
+  #   if is_soccer_stage2 and cfg.agent.resume:
+  #     print("[INFO] Stage II transfer: loading only iteration counter (MLP→LSTM).")
+  #     load_cfg = {"actor": False, "critic": False, "normalizer": False}
+  #   runner.load(str(resume_path), load_cfg=load_cfg)
+
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    # Stage I→II transfer: architectures differ (MLP→LSTM, 154D→160D).
-    # Only restore iteration counter; skip actor/critic/normalizer weights.
-    is_soccer_stage2 = task_id == "Unitree-G1-Shooter-Stage2"
-    load_cfg = None
-    if is_soccer_stage2 and cfg.agent.resume:
-      print("[INFO] Stage II transfer: loading only iteration counter (MLP→LSTM).")
-      load_cfg = {"actor": False, "critic": False, "normalizer": False}
-    runner.load(str(resume_path), load_cfg=load_cfg)
+    runner.load(str(resume_path))
 
   # Only write config files from rank 0 to avoid race conditions.
   if rank == 0:

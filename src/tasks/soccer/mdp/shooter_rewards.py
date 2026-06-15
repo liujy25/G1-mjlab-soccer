@@ -94,6 +94,52 @@ def pelvis_orientation(env: ManagerBasedRlEnv, command_name: str = "motion") -> 
   return torch.sum(torch.square(pelvis_proj[:, :2]), dim=1)
 
 
+def undesired_contacts(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "contact_forces",
+  threshold: float = 1.0,
+  excluded_body_names: tuple[str, ...] = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+  ),
+) -> torch.Tensor:
+  """Penalize non-foot/non-wrist ground contacts."""
+  sensors = env.scene.sensors
+  if sensors is None:
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+  try:
+    sensor = sensors[sensor_name]
+  except (KeyError, TypeError):
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+  force = sensor.data.force
+  if force is None or force.numel() == 0:
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+  slots = getattr(sensor, "_slots", ())
+  field_name = "force" if any(getattr(s, "field_name", None) == "force" for s in slots) else "found"
+  primary_names = [s.primary_name for s in slots if getattr(s, "field_name", None) == field_name]
+  if not primary_names:
+    force_norm = torch.linalg.vector_norm(force.to(env.device), dim=-1)
+    return torch.sum((force_norm > threshold).to(torch.float32), dim=-1)
+
+  num_slots = int(getattr(sensor.cfg, "num_slots", 1))
+  num_bodies = len(primary_names)
+  force_norm = torch.linalg.vector_norm(force.to(env.device), dim=-1)
+  force_norm = force_norm.view(env.num_envs, num_bodies, num_slots)
+
+  excluded = set(excluded_body_names)
+  penalized_mask = torch.tensor(
+    [name not in excluded for name in primary_names],
+    device=env.device,
+    dtype=torch.bool,
+  )
+  contact = force_norm.amax(dim=-1) > threshold
+  return torch.sum((contact & penalized_mask.unsqueeze(0)).to(torch.float32), dim=-1)
+
+
 # -- Soccer / kick rewards ------------------------------------------------------
 
 def _get_target_point_world(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
@@ -252,6 +298,7 @@ def ball_velocity_direction_alignment(
   vel = ball.data.root_link_lin_vel_w
   vel_xy = vel[:, :2]
   vel_xy_norm = torch.norm(vel_xy, dim=-1, keepdim=True)
+  vel_norm = torch.norm(vel, dim=-1)
 
   direction = command.target_destination_pos - command.initial_target_point_pos
   dir_xy = direction[:, :2]
@@ -261,7 +308,11 @@ def ball_velocity_direction_alignment(
   timer = _open_timer_window(env, timer_name, command, ball_sensor_name,
                               horizontal_force_threshold, foot_body_names, 5)
 
-  speed_valid = (vel_xy_norm.squeeze(-1) > 1e-6) & (dir_norm.squeeze(-1) > 1e-6)
+  speed_valid = (
+    (vel_norm > velocity_threshold)
+    & (vel_xy_norm.squeeze(-1) > 1e-6)
+    & (dir_norm.squeeze(-1) > 1e-6)
+  )
   active = (timer > 0) & speed_valid
 
   reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
@@ -295,12 +346,42 @@ def ball_speed_reward(
   timer = _open_timer_window(env, timer_name, command, ball_sensor_name,
                               horizontal_force_threshold, foot_body_names, 5)
 
-  speed_valid = speed_xy > 1e-6
+  speed_valid = speed_xy > velocity_threshold
   active = (timer > 0) & speed_valid
 
   reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
   if torch.any(active):
     reward[active] = 1.0 - torch.exp(-(speed_xy[active] ** 2) / (std**2))
+
+  timer = torch.where(timer > 0, timer - 1, timer)
+  setattr(env, timer_name, timer)
+  return reward
+
+
+def ball_z_speed_penalty_reward(
+  env: ManagerBasedRlEnv,
+  command_name: str = "motion",
+  std: float = 3.0,
+  velocity_threshold: float = 0.5,
+  horizontal_force_threshold: float = 10.0,
+  ball_sensor_name: str = "ball_robot_contact",
+  foot_body_names: tuple[str, ...] = (),
+) -> torch.Tensor:
+  """Penalty magnitude for excessive vertical ball speed after a correct-foot kick."""
+  command: MultiMotionSoccerCommand = env.command_manager.get_term(command_name)
+  ball = env.scene["ball"]
+  vel = ball.data.root_link_lin_vel_w
+  speed = torch.norm(vel, dim=-1)
+  z_speed = torch.abs(vel[:, 2])
+
+  timer_name = f"_{command_name}_z_speed_timer"
+  timer = _open_timer_window(env, timer_name, command, ball_sensor_name,
+                              horizontal_force_threshold, foot_body_names, 5)
+
+  active = (timer > 0) & (speed > velocity_threshold)
+  reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+  if torch.any(active):
+    reward[active] = torch.tanh(z_speed[active] / (std + 1e-8))
 
   timer = torch.where(timer > 0, timer - 1, timer)
   setattr(env, timer_name, timer)

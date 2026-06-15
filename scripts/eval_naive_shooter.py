@@ -110,6 +110,8 @@ def run_trial(env, policy, max_steps: int = 500) -> dict:
   obs = env.reset()
   if isinstance(obs, tuple):
     obs = obs[0]
+  if hasattr(policy, "reset"):
+    policy.reset()
 
   ball = env.unwrapped.scene["ball"]
   kicked = False

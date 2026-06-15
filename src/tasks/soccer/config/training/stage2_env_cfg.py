@@ -32,6 +32,7 @@ from src.tasks.soccer.mdp.shooter_rewards import (
   action_rate_l2_clip,
   ball_speed_reward,
   ball_velocity_direction_alignment,
+  ball_z_speed_penalty_reward,
   foot_distance,
   pelvis_orientation,
   sideways_kick,
@@ -114,14 +115,17 @@ def make_stage2_env_cfg() -> ManagerBasedRlEnvCfg:
     weight=0.0,
     params={"command_name": "motion", "std": 0.3},
   )
-  # Anchor orientation unchanged from Stage I (reference keeps 1.0, not 0.5).
-  # track_body_lin_vel / track_body_ang_vel: unchanged from Stage I (1.0).
+  cfg.rewards["track_anchor_ori"] = RewardTermCfg(
+    func=cfg.rewards["track_anchor_ori"].func,
+    weight=0.5,
+    params={"command_name": "motion", "std": 0.4},
+  )
 
   # Use filtered body tracking (exclude ankles for positional generalization,
   # matching reference G1FlatProximityEnvCfg body_names subset).
   cfg.rewards["track_body_pos"] = RewardTermCfg(
     func=cfg.rewards["track_body_pos"].func,
-    weight=1.0,
+    weight=0.8,
     params={
       "command_name": "motion",
       "std": 0.3,
@@ -137,7 +141,7 @@ def make_stage2_env_cfg() -> ManagerBasedRlEnvCfg:
   )
   cfg.rewards["track_body_ori"] = RewardTermCfg(
     func=cfg.rewards["track_body_ori"].func,
-    weight=1.0,
+    weight=0.8,
     params={
       "command_name": "motion",
       "std": 0.4,
@@ -150,6 +154,16 @@ def make_stage2_env_cfg() -> ManagerBasedRlEnvCfg:
         "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
       ),
     },
+  )
+  cfg.rewards["track_body_lin_vel"] = RewardTermCfg(
+    func=cfg.rewards["track_body_lin_vel"].func,
+    weight=0.8,
+    params={"command_name": "motion", "std": 1.0},
+  )
+  cfg.rewards["track_body_ang_vel"] = RewardTermCfg(
+    func=cfg.rewards["track_body_ang_vel"].func,
+    weight=0.8,
+    params={"command_name": "motion", "std": 3.14},
   )
 
   # Soccer rewards.
@@ -199,6 +213,18 @@ def make_stage2_env_cfg() -> ManagerBasedRlEnvCfg:
     params={
       "command_name": "motion",
       "std": 1.2,
+      "velocity_threshold": 0.5,
+      "ball_sensor_name": "ball_robot_contact",
+      "horizontal_force_threshold": 10.0,
+      "foot_body_names": _foot_names,
+    },
+  )
+  cfg.rewards["ball_z_speed"] = RewardTermCfg(
+    func=ball_z_speed_penalty_reward,
+    weight=-0.2,
+    params={
+      "command_name": "motion",
+      "std": 3.0,
       "velocity_threshold": 0.5,
       "ball_sensor_name": "ball_robot_contact",
       "horizontal_force_threshold": 10.0,

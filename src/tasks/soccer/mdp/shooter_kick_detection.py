@@ -52,9 +52,13 @@ class KickContactTracker:
     self._foot_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
   def begin_step(self):
-    """Reset per-step cache at the beginning of each command update."""
+    """Reset per-step cache and handle envs that just resampled motions."""
     self._cache_valid = False
     self._cached_event = None
+    flag_name = self._tensor_name("motion_resampled")
+    resample_flags = getattr(self._env, flag_name, None)
+    if resample_flags is not None and resample_flags.shape[0] == self._num_envs:
+      self._handle_resample(resample_flags.to(device=self._device, dtype=torch.bool))
 
   def detect(
     self,
@@ -77,8 +81,11 @@ class KickContactTracker:
       self._cache_valid = True
       return event
 
-    # mjlab ContactData: force [B, N, 3], found [B, N].
-    force = ball_sensor.data.force
+    # Prefer substep history so short ball-foot impacts are not missed between
+    # policy steps. Fallback keeps sensors without history usable.
+    force = getattr(ball_sensor.data, "force_history", None)
+    if force is None or force.numel() == 0:
+      force = ball_sensor.data.force
     if force is None or force.numel() == 0:
       event = KickContactEvent(
         new_contact=torch.zeros(self._num_envs, dtype=torch.bool, device=self._device),
@@ -90,9 +97,12 @@ class KickContactTracker:
       return event
 
     force = force.to(device=self._device)
-    # Take max over contact slots.
-    force_norm = torch.linalg.vector_norm(force, dim=-1)  # [B, N]
-    peak_force = force_norm.amax(dim=-1) if force_norm.ndim > 1 else force_norm  # [B]
+    # Take max over contact slots and history samples.
+    force_norm = torch.linalg.vector_norm(force, dim=-1)
+    if force_norm.ndim > 1:
+      peak_force = force_norm.amax(dim=tuple(range(1, force_norm.ndim)))
+    else:
+      peak_force = force_norm
     kick_detected = peak_force > horizontal_force_threshold
 
     contact_awarded = self._get_or_init_bool("target_contact_awarded", default=False)
@@ -225,9 +235,19 @@ class KickContactTracker:
     expected[resample_flags] = False
     frozen[resample_flags] = 0.0
 
-    # Reset reward timers.
-    for suffix in ["dir_align_timer", "speed_timer", "z_speed_timer"]:
-      name = f"_{self._state_prefix}_{suffix}"
+    # Reset reward timers/state to avoid stale sparse reward windows.
+    for suffix in [
+      "dir_align_timer",
+      "dir_align_prev",
+      "speed_timer",
+      "speed_prev",
+      "z_speed_timer",
+      "z_speed_prev",
+    ]:
+      name = self._tensor_name(suffix)
       t = getattr(self._env, name, None)
       if t is not None and t.shape[0] == self._num_envs:
         t[resample_flags] = 0
+
+    resample_flags[resample_flags] = False
+    setattr(self._env, self._tensor_name("motion_resampled"), resample_flags)

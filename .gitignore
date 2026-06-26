@@ -3,6 +3,9 @@
 outputs
 logs
 wandb
+videos
+phase1_eval_results
+phase2/results
 MUJOCO_LOG.TXT
 deploy/robots/go2/build
 deploy/robots/g1/build
@@ -17,6 +20,7 @@ private
 .claude
 .codex
 temp
+server_models
 *.bbl
 *.synctex.gz
 *.aux

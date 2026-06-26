@@ -49,6 +49,7 @@ _GOAL_HEIGHT = 1.8       # m — crossbar height
 _GOAL_Y = -5.0           # goal plane y-position
 _GOAL_CENTER = (0.0, -5.0, 0.9)  # center of goal opening
 _KICK_SPEED_THRESHOLD = 1.0  # m/s
+_EVAL_SEEDS = (202606, 2810, 42)
 
 
 @dataclass
@@ -141,9 +142,10 @@ def run_trial(env, policy, max_steps: int = 500) -> dict:
     if _is_goal(ball_pos):
       goal_scored = True
 
-    ball_final_y = float(ball_pos[1])
     if terminated:
       break
+
+    ball_final_y = float(ball_pos[1])
 
   return {
     "goal": goal_scored, "kick_speed": kick_speed,
@@ -155,8 +157,8 @@ def run_trial(env, policy, max_steps: int = 500) -> dict:
 def run_headless_eval(cfg: EvalConfig, env, policy):
   if cfg.num_trials <= 0:
     print("[WARN] --headless without --num-trials: nothing to evaluate.")
-    return
-  print(f"\n[INFO] Running {cfg.num_trials} headless eval trials...\n")
+    return None
+  print(f"\n[INFO] Running {cfg.num_trials} headless eval trials (seed={cfg.seed})...\n")
   results = []
   goals = 0
   accuracies = []
@@ -194,6 +196,16 @@ def run_headless_eval(cfg: EvalConfig, env, policy):
   print(f"  Mean Kick Speed:     {mean_speed:.2f} m/s")
   print(f"  Ball past goal line: {ball_past}/{total}")
   print(f"{'='*55}\n")
+  return {
+    "seed": cfg.seed,
+    "total": total,
+    "goals": goals,
+    "success_rate": success_rate,
+    "mean_acc": mean_acc,
+    "std_acc": std_acc,
+    "mean_speed": mean_speed,
+    "ball_past": ball_past,
+  }
 
 
 # -- Viewer -------------------------------------------------------------------
@@ -220,6 +232,7 @@ def run_eval(cfg: EvalConfig):
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
   env_cfg = load_env_cfg(cfg.task_id, play=False)
+  env_cfg.seed = cfg.seed
   env_cfg.scene.num_envs = 1
   env_cfg.viewer.height = cfg.video_height
   env_cfg.viewer.width = cfg.video_width
@@ -256,13 +269,51 @@ def run_eval(cfg: EvalConfig):
   print(f"Critic obs dim: {obs_space.spaces['critic'].shape}")
 
   if cfg.headless:
-    run_headless_eval(cfg, env, policy)
+    result = run_headless_eval(cfg, env, policy)
   else:
     if cfg.num_trials > 0:
       print("[INFO] --num-trials set without --headless; running viewer.")
     run_viewer(cfg, env, policy)
 
   env.close()
+  return result if cfg.headless else None
+
+
+def run_multi_seed_eval(cfg: EvalConfig):
+  results = []
+  for seed in _EVAL_SEEDS:
+    print(f"\n[INFO] ===== Evaluating seed {seed} =====")
+    cfg.seed = seed
+    cfg.video = False
+    result = run_eval(cfg)
+    if result is not None:
+      results.append(result)
+
+  if not results:
+    return
+
+  print(f"\n{'='*72}")
+  print("  Multi-Seed Eval Summary")
+  print(f"{'='*72}")
+  for r in results:
+    print(
+      f"  Seed {r['seed']:>6}: "
+      f"success={r['goals']}/{r['total']} ({r['success_rate']:.1f}%), "
+      f"acc={r['mean_acc']:.4f}±{r['std_acc']:.4f}, "
+      f"speed={r['mean_speed']:.2f} m/s, "
+      f"past_line={r['ball_past']}/{r['total']}"
+    )
+
+  totals = sum(r["total"] for r in results)
+  goals = sum(r["goals"] for r in results)
+  weighted_speed = sum(r["mean_speed"] * r["total"] for r in results) / totals
+  weighted_acc = sum(r["mean_acc"] * r["total"] for r in results) / totals
+  print("-" * 72)
+  print(
+    f"  Overall: success={goals}/{totals} ({goals / totals * 100:.1f}%), "
+    f"mean_acc={weighted_acc:.4f}, mean_speed={weighted_speed:.2f} m/s"
+  )
+  print(f"{'='*72}\n")
 
 
 def main():
@@ -270,7 +321,10 @@ def main():
   import src.tasks  # noqa: F401
 
   args = tyro.cli(EvalConfig, prog="eval_naive_shooter")
-  run_eval(args)
+  if args.headless:
+    run_multi_seed_eval(args)
+  else:
+    run_eval(args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,110 @@
+# CS2810 Phase 2 fixed tournament configuration.
+#
+# Public audit output intentionally exposes only the minimum stable parameters
+# students need to reproduce the action interface and basic physics.
+
+episode_length_s: 5.0
+num_trials_default: 10
+
+scene:
+  shooter_pos: [4.0, 0.0, 0.8]
+  shooter_yaw: 3.141592653589793
+  goalkeeper_pos: [0.0, 0.0, 0.8]
+  goalkeeper_yaw: 0.0
+  ball_pos: [3.0, 0.0, 0.1]
+
+goal:
+  pos: [-0.5, 0.0, 0.0]
+  plane_x: -0.5
+  half_width: 1.5
+  height: 1.8
+
+sim:
+  timestep: 0.005
+  decimation: 4
+  nconmax: 256
+  njmax: 3000
+  contact_sensor_maxmatch: 500
+  iterations: 10
+  ls_iterations: 20
+  ccd_iterations: 500
+
+ground_contact:
+  solref: [0.02, 0.07]
+  solimp: [0.9, 0.95, 0.001, 0.5, 2]
+  friction: [1.0, 1.0]
+
+actions:
+  action_dim: 29
+  shooter_scale: "G1_ACTION_SCALE"
+  goalkeeper_scale: 0.25
+
+robot:
+  joint_order:
+    - left_hip_pitch_joint
+    - left_hip_roll_joint
+    - left_hip_yaw_joint
+    - left_knee_joint
+    - left_ankle_pitch_joint
+    - left_ankle_roll_joint
+    - right_hip_pitch_joint
+    - right_hip_roll_joint
+    - right_hip_yaw_joint
+    - right_knee_joint
+    - right_ankle_pitch_joint
+    - right_ankle_roll_joint
+    - waist_yaw_joint
+    - waist_roll_joint
+    - waist_pitch_joint
+    - left_shoulder_pitch_joint
+    - left_shoulder_roll_joint
+    - left_shoulder_yaw_joint
+    - left_elbow_joint
+    - left_wrist_roll_joint
+    - left_wrist_pitch_joint
+    - left_wrist_yaw_joint
+    - right_shoulder_pitch_joint
+    - right_shoulder_roll_joint
+    - right_shoulder_yaw_joint
+    - right_elbow_joint
+    - right_wrist_roll_joint
+    - right_wrist_pitch_joint
+    - right_wrist_yaw_joint
+  shooter_initial_joints:
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+     0.0, 0.0, 0.0]
+  goalkeeper_initial_joints:
+    [0.0, 0.0, 0.0, -0.35, 0.7, -0.35, -0.25, 0.3, -0.1, -0.35, 0.7,
+     -0.35, -0.25, 0.3, -0.1, 0.0, 0.3, 0.0, 0.8, 0.0, -1.6, 0.0, 0.5,
+     0.0, 0.0, 0.8, 0.0, -1.6, 0.0]
+
+web:
+  host: 0.0.0.0
+  port: 6006
+  external_url: "http://10.15.89.71:54905"
+  max_concurrent_matches: 4
+
+viser_slots:
+  - name: slot0
+    port: 7000
+    external_url: "http://10.15.89.71:43862"
+  - name: slot1
+    port: 7001
+    external_url: "http://10.15.89.71:37448"
+  - name: slot2
+    port: 7002
+    external_url: "http://10.15.89.71:65025"
+  - name: slot3
+    port: 7003
+    external_url: "http://10.15.89.71:17192"
+
+local_api_slots:
+  - port: 8000
+    external_url: "http://10.15.89.71:17668"
+  - port: 8001
+    external_url: "http://10.15.89.71:18834"
+  - port: 8002
+    external_url: "http://10.15.89.71:59175"
+  - port: 8003
+    external_url: "http://10.15.89.71:56080"
